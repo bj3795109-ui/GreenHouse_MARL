@@ -1,24 +1,42 @@
 # Python virtual environments
 .venv/
-env/
 venv/
 
-# Python cache
+# Python bytecode and cache files
 __pycache__/
 *.py[cod]
+*$py.class
 
-# Pytest
+# Test and coverage artifacts
 .pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Type-checker / linter caches
+.mypy_cache/
+.pyright/
+.ruff_cache/
 
 # Environment variables and secrets
 .env
 .env.*
 !.env.example
 
-# IDE
+# Build and packaging artifacts
+build/
+dist/
+*.egg-info/
+
+# Logs
+*.log
+
+# IDE and editor settings
 .idea/
 .vscode/
 
-# OS
+# Operating-system files
 .DS_Store
 Thumbs.db
