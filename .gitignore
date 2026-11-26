@@ -7,11 +7,22 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Test and coverage artifacts
+# Python virtual environments
+.venv/
+venv/
+
+# Python bytecode and cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest and coverage artifacts
 .pytest_cache/
 .coverage
 .coverage.*
 htmlcov/
+
+# Test and coverage artifacts
 .tox/
 .nox/
 

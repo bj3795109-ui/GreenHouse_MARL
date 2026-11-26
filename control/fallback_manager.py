@@ -6,6 +6,7 @@ ZoneControllers, CropConfigLoader, and SensorInterface around GreenhouseEnv.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any, Mapping, Optional
 
 import numpy as np
@@ -18,11 +19,13 @@ from control.types import (
     AmbientState,
     ControlMode,
     PIDGains,
-    SensorMeasurement,
+    VARS,
     ZONE_IDS,
     ZoneStatus,
 )
 from control.zone_controller import ZoneController
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -57,6 +60,8 @@ class FallbackManager:
         self.supervisors: dict[str, ZoneSupervisor] = {}
 
         for z in ZONE_IDS:
+            if z not in pid_gains:
+                raise ValueError(f"pid_gains missing entry for '{z}'")
             zc = ZoneController(z, dict(pid_gains[z]), actuator_cfg=actuator_cfg)
             sup = ZoneSupervisor(z, zc, cfg=supervisor_cfg, initial_mode=initial_mode)
             self.controllers[z] = zc
@@ -110,17 +115,43 @@ class FallbackManager:
         err_map = agent_errors or {}
 
         for z in ZONE_IDS:
-            bounds = self.crop_loader.get_zone_targets(z)
             raw_act = marl_map.get(z, None)
             failed = bool(err_map.get(z, False)) or (z not in marl_map)
-
-            status = self.supervisors[z].step(
-                raw_marl_action=raw_act,
-                measurements=meas_by_zone[z],
-                bounds=bounds,
-                ambient=amb,
-                agent_failed=failed,
-            )
+            sup = self.supervisors[z]
+            try:
+                bounds = self.crop_loader.get_zone_targets(z)
+                status = sup.step(
+                    raw_marl_action=raw_act,
+                    measurements=meas_by_zone[z],
+                    bounds=bounds,
+                    ambient=amb,
+                    agent_failed=failed,
+                )
+            except (ValueError, TypeError, KeyError, ArithmeticError, RuntimeError) as exc:
+                err_msg = f"zone_step_failure:{type(exc).__name__}:{exc}"
+                logger.exception("Zone %s supervision step failed; isolating to SAFE_MODE: %s", z, err_msg)
+                sup.metrics.pid_failures += 1
+                sup._record_fault(err_msg)
+                sup._pid_fault_active = True
+                sup._safe_mode_cooldown = sup.cfg.safe_mode_retry_steps
+                trans_from, trans_reason = sup.transition_to(ControlMode.SAFE_MODE, err_msg)
+                sup.metrics.safe_mode_steps += 1
+                sup._cont_heat_steps = 0
+                sup._cont_water_steps = 0
+                sup._prev_executed = (0, 0, 0, 0)
+                status = ZoneStatus(
+                    zone_id=z,
+                    mode=sup.mode,
+                    executed_action=(0, 0, 0, 0),
+                    pid_action=(0, 0, 0, 0),
+                    marl_valid=False,
+                    marl_failure_reason=err_msg,
+                    recovery_streak=0,
+                    transitioned_from=trans_from,
+                    transition_reason=trans_reason,
+                    arbiter_reason=err_msg,
+                    measurement_qualities={v: meas_by_zone[z][v].quality for v in VARS},
+                )
             statuses[z] = status
             final_actions[z] = np.array(status.executed_action, dtype=np.int8)
 
@@ -152,6 +183,10 @@ class FallbackManager:
                 "recovery_success_rate": (
                     m.recovery_successes / m.recovery_attempts if m.recovery_attempts > 0 else 1.0
                 ),
+                "pid_failures": m.pid_failures,
+                "invalid_transitions_rejected": m.invalid_transitions_rejected,
+                "last_fault_reason": m.last_fault_reason,
+                "fault_history": list(m.fault_history),
                 "actuator_toggles": m.actuator_toggles,
                 "transitions": list(m.transition_log),
             }

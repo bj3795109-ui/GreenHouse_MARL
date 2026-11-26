@@ -161,3 +161,101 @@ def test_staleness_detection_rejects_old_or_frozen_timestamps():
     # Old timestamp (current_time - ts > 5.0) -> stale
     m_old = si.from_raw_dict(raw, timestamps={"zone_1": {"T": 10.0}}, current_time=20.0)["zone_1"]["T"]
     assert m_old.stale is True
+
+
+def test_trust_network_to_sensor_interface_nan_and_recovery_integration():
+    """End-to-end check of TrustNetwork -> SensorInterface across NaN fault and recovery."""
+    import sys
+
+    tn_dir = str(Path(__file__).resolve().parent.parent.parent / "trust_network")
+    env_dir = str(Path(__file__).resolve().parent.parent.parent / "env")
+    if tn_dir not in sys.path:
+        sys.path.insert(0, tn_dir)
+    if env_dir not in sys.path:
+        sys.path.insert(0, env_dir)
+
+    from env import GreenhouseEnv, PlaceholderParams
+    from harness import Fault, NoisySensors, bootstrap_healthy
+    from trust_network import AssumedParams, TrustNetwork, ZONE_IDS
+
+    params = PlaceholderParams()
+    healthy = bootstrap_healthy(AssumedParams.from_env(params), n_episodes=3, steps=200)
+    env = GreenhouseEnv(params=params, max_steps=250)
+    env.reset(seed=21)
+    rng = np.random.default_rng(21)
+    faults = [Fault("zone_2", "T", "nan", start=20, end=70)]
+    sensors = NoisySensors(rng, faults=faults)
+    net = TrustNetwork(AssumedParams.from_env(params), healthy=healthy)
+    net.reset(sensors.read(env.state, 0))
+
+    si = SensorInterface(SensorInterfaceConfig(theta_trust_good=0.60, theta_est_min=0.15, t_hold_max=3))
+    acts = {z: np.array([0, 0, 0, 0], dtype=np.int8) for z in ZONE_IDS}
+
+    qualities_z2 = []
+    for t in range(1, 140):
+        env.step(acts)
+        records = net.step(sensors.read(env.state, t), acts)
+        meas = si.from_trust_records(records, current_time=float(t))
+        qualities_z2.append(meas["zone_2"]["T"].quality)
+        assert np.isfinite(meas["zone_2"]["T"].value)
+        assert meas["zone_1"]["T"].quality == MeasurementQuality.TRUSTED
+        assert meas["zone_3"]["T"].quality == MeasurementQuality.TRUSTED
+
+    # During NaN fault (t=20..69 -> idx 19..68), zone_2 switches immediately to ESTIMATE_ONLY
+    assert all(q == MeasurementQuality.ESTIMATE_ONLY for q in qualities_z2[19:69])
+    # After recovery, zone_2 returns to TRUSTED once EMA trust climbs back >= theta_trust_good
+    assert qualities_z2[-1] == MeasurementQuality.TRUSTED
+
+
+def test_trust07_all_sensors_unreliable_escalates_to_failsafe_in_sensor_interface():
+    import sys
+
+    tn_dir = str(Path(__file__).resolve().parent.parent.parent / "trust_network")
+    env_dir = str(Path(__file__).resolve().parent.parent.parent / "env")
+    if tn_dir not in sys.path:
+        sys.path.insert(0, tn_dir)
+    if env_dir not in sys.path:
+        sys.path.insert(0, env_dir)
+
+    from env import GreenhouseEnv, PlaceholderParams
+    from harness import Fault, NoisySensors
+    from trust_network import AssumedParams, TrustNetwork, ZONE_IDS
+
+    params = PlaceholderParams()
+    env = GreenhouseEnv(params=params, max_steps=50)
+    env.reset(seed=30)
+    faults = [
+        Fault(z, v, "nan", start=1)
+        for z in ZONE_IDS
+        for v in ("T", "H", "M")
+    ]
+    sensors = NoisySensors(np.random.default_rng(30), faults=faults)
+    net = TrustNetwork(AssumedParams.from_env(params))
+    net.reset(sensors.read(env.state, 0))
+
+    si = SensorInterface(SensorInterfaceConfig(t_hold_max=2, t_est_max={"T": 4, "H": 4, "M": 3}))
+    acts = {z: np.array([0, 0, 0, 0], dtype=np.int8) for z in ZONE_IDS}
+    for t in range(1, 10):
+        env.step(acts)
+        records = net.step(sensors.read(env.state, t), acts)
+        meas = si.from_trust_records(records, current_time=float(t))
+
+    for z in ZONE_IDS:
+        for v in ("T", "H", "M"):
+            assert meas[z][v].quality == MeasurementQuality.UNRELIABLE_FAILSAFE
+            assert meas[z][v].value is None
+
+
+def test_from_env_observations_handles_valid_missing_and_nan_vectors():
+    si = SensorInterface(SensorInterfaceConfig(t_hold_max=2))
+    obs = {
+        "zone_1": np.array([22.5, 65.0, 45.0, 23.0, 60.0, 40.0, 24.0, 55.0, 50.0], dtype=np.float32),
+        "zone_2": np.array([float("nan"), 60.0, 40.0], dtype=np.float32),
+        # zone_3 omitted -> treated as missing
+    }
+    meas = si.from_env_observations(obs)
+    assert meas["zone_1"]["T"].quality == MeasurementQuality.TRUSTED
+    assert meas["zone_1"]["T"].value == pytest.approx(22.5)
+    assert meas["zone_2"]["T"].quality == MeasurementQuality.HOLD_TRANSIENT
+    assert meas["zone_2"]["H"].quality == MeasurementQuality.TRUSTED
+    assert meas["zone_3"]["M"].quality == MeasurementQuality.HOLD_TRANSIENT

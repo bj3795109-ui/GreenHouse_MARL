@@ -28,9 +28,10 @@ SENSOR_SIGMA = {"T": 0.1, "H": 0.5, "M": 0.5}
 class Fault:
     zone: str
     var: str
-    kind: str          # "stuck" | "drift" | "bias"
+    kind: str          # "stuck" | "drift" | "bias" | "nan" | "inf" | "spike" | "dropout"
     start: int
-    magnitude: float = 0.0   # drift: units per step; bias: constant offset
+    magnitude: float = 0.0   # drift: units per step; bias/spike: offset; inf: sign (+1 or -1)
+    end: int | None = None   # optional exclusive end step for recovery experiments
 
 
 class NoisySensors:
@@ -45,21 +46,31 @@ class NoisySensors:
             for v in VARS:
                 val = state[z][v] + self.rng.normal(0, self.sigma[v])
                 for f in self.faults:
-                    if f.zone == z and f.var == v and t >= f.start:
+                    active = (f.zone == z and f.var == v and t >= f.start and (f.end is None or t < f.end))
+                    if active:
                         if f.kind == "stuck":
                             val = self._stuck.setdefault((z, v), val)
                         elif f.kind == "drift":
                             val += f.magnitude * (t - f.start)
                         elif f.kind == "bias":
                             val += f.magnitude
+                        elif f.kind == "spike":
+                            val += f.magnitude
+                        elif f.kind in ("nan", "dropout"):
+                            val = float("nan")
+                        elif f.kind == "inf":
+                            val = float("-inf") if f.magnitude < 0 else float("inf")
+                    elif f.zone == z and f.var == v and f.kind == "stuck" and f.end is not None and t >= f.end:
+                        self._stuck.pop((z, v), None)
                 out[z][v] = RawReading(float(val))
         return out
 
 
 def rollout(net, steps=600, seed=0, faults=None, env_params=None, return_truth=False):
-    """Run one episode with random actions. Returns list of per-step record dicts."""
+    """Run one episode with seeded random actions. Returns list of per-step record dicts."""
     env = GreenhouseEnv(params=env_params, max_steps=steps + 1)
     env.reset(seed=seed)
+    env.action_space(ZONE_IDS[0]).seed(seed)
     rng = np.random.default_rng(seed + 1000)
     sensors = NoisySensors(rng, faults=faults)
     net.reset(sensors.read(env.state, 0))
