@@ -35,7 +35,7 @@ TUNING_PATH = ROOT / "control" / "configs" / "pid_tuning.json"
 
 @pytest.fixture(scope="module")
 def healthy_residuals():
-    return bootstrap_healthy(AssumedParams.from_env(PlaceholderParams()), n_episodes=5, steps=300)
+    return bootstrap_healthy(AssumedParams.from_env(PlaceholderParams()), n_episodes=10, steps=300)
 
 
 def _make_manager(supervisor_cfg=None, initial_mode=ControlMode.MARL_ACTIVE):
@@ -309,3 +309,297 @@ def test_scenario_14_and_17_persistent_divergence_and_counterproductive_ambient(
             assert res.statuses["zone_1"].executed_action[1] == 0
         env.step(res.actions)
         prev_actions = res.actions
+
+
+def test_critical_three_zone_acceptance_zone2_crash_safe_mode_and_recovery(healthy_residuals, monkeypatch):
+    """
+    Critical acceptance test:
+    - All 3 zones start on surrogate healthy actions (NOT a trained MAPPO policy).
+    - Zone 2 agent crashes -> Zone 2 enters PID_FALLBACK while Zones 1 & 3 stay MARL_ACTIVE.
+    - Zone 2 PID also fails -> Zone 2 enters SAFE_MODE with (0,0,0,0); Zones 1 & 3 stay MARL_ACTIVE.
+    - Restore Zone 2 PID and agent -> Zone 2 follows SAFE_MODE -> PID_FALLBACK -> RECOVERY_PENDING -> MARL_ACTIVE
+      without prematurely returning to MARL or interrupting Zones 1 & 3.
+    """
+    params = PlaceholderParams()
+    env = GreenhouseEnv(params=params, max_steps=120)
+    obs, _ = env.reset(seed=10)
+    rng = np.random.default_rng(10)
+    sensors = NoisySensors(rng)
+    net = TrustNetwork(AssumedParams.from_env(params), healthy=healthy_residuals)
+    net.reset(sensors.read(env.state, 0))
+
+    fm, loader = _make_manager(
+        supervisor_cfg=SupervisorConfig(N_confirm=4, safe_mode_retry_steps=2)
+    )
+    ambient = AmbientState(params.T_ambient, params.H_ambient)
+    z2_ctrl = fm.controllers["zone_2"]
+    orig_z2_step = z2_ctrl.step
+
+    def _z2_boom(*args, **kwargs):
+        raise RuntimeError("zone_2 PID fault")
+
+    prev_actions = {z: np.array([0, 0, 0, 0], dtype=np.int8) for z in ZONE_IDS}
+    z2_modes: list[ControlMode] = []
+
+    for t in range(1, 55):
+        records = net.step(sensors.read(env.state, t), prev_actions)
+        marl_acts = _simple_healthy_marl(obs, loader, ambient)
+
+        # Phase A (t=10..17): Zone 2 agent crashes -> PID_FALLBACK
+        if 10 <= t < 18:
+            del marl_acts["zone_2"]
+
+        # Phase B (t=18..25): Zone 2 agent still crashed AND Zone 2 PID controller fails -> SAFE_MODE
+        if t == 18:
+            monkeypatch.setattr(z2_ctrl, "step", _z2_boom)
+        if 18 <= t < 26:
+            del marl_acts["zone_2"]
+
+        # Phase C (t=26..54): Restore Zone 2 PID and Zone 2 agent
+        if t == 26:
+            monkeypatch.setattr(z2_ctrl, "step", orig_z2_step)
+
+        res = fm.step(marl_acts, records, ambient=ambient)
+        z2_modes.append(res.statuses["zone_2"].mode)
+
+        # Zones 1 & 3 must NEVER fall back or reset throughout the entire incident
+        assert res.statuses["zone_1"].mode == ControlMode.MARL_ACTIVE
+        assert res.statuses["zone_3"].mode == ControlMode.MARL_ACTIVE
+
+        if t == 12:
+            assert res.statuses["zone_2"].mode == ControlMode.PID_FALLBACK
+        if 18 <= t < 26:
+            assert res.statuses["zone_2"].mode == ControlMode.SAFE_MODE
+            assert res.statuses["zone_2"].executed_action == (0, 0, 0, 0)
+
+        obs, _, _, _, _ = env.step(res.actions)
+        prev_actions = res.actions
+
+    # After restoration at t=26, Zone 2 must pass through PID_FALLBACK and RECOVERY_PENDING before MARL_ACTIVE
+    post_restore = z2_modes[25:]  # t >= 26
+    assert ControlMode.PID_FALLBACK in post_restore
+    assert ControlMode.RECOVERY_PENDING in post_restore
+    assert post_restore[0] != ControlMode.MARL_ACTIVE  # cannot jump immediately to MARL
+    assert res.statuses["zone_2"].mode == ControlMode.MARL_ACTIVE
+
+    metrics = fm.get_metrics()
+    assert metrics["zone_1"]["marl_to_pid_switches"] == 0
+    assert metrics["zone_3"]["marl_to_pid_switches"] == 0
+    assert metrics["zone_2"]["safe_mode_events"] >= 1
+    assert metrics["zone_2"]["recovery_successes"] >= 1
+
+
+def test_long_running_closed_loop_control_stability(healthy_residuals):
+    """Long-running 1000-step closed-loop stability test across MARL, PID fallback, and recovery."""
+    params = PlaceholderParams()
+    env = GreenhouseEnv(params=params, max_steps=1200)
+    obs, _ = env.reset(seed=99)
+    rng = np.random.default_rng(99)
+    sensors = NoisySensors(rng)
+    net = TrustNetwork(AssumedParams.from_env(params), healthy=healthy_residuals)
+    net.reset(sensors.read(env.state, 0))
+    loader = CropConfigLoader.from_json_file(DATASET_PATH)
+    loader.assign_zone("zone_1", "tomato", "vegetative")
+    loader.assign_zone("zone_2", "lettuce", "mature")
+    loader.assign_zone("zone_3", "cucumber", "flowering")
+    fm = FallbackManager(
+        crop_loader=loader,
+        pid_gains=load_pid_tuning(TUNING_PATH),
+        sensor_cfg=SensorInterfaceConfig(theta_trust_good=0.45, t_est_max={"T": 300, "H": 300, "M": 60}),
+        supervisor_cfg=SupervisorConfig(N_confirm=6, theta_recovery_trust=0.45),
+    )
+    ambient = AmbientState(params.T_ambient, params.H_ambient)
+
+    prev_actions = {z: np.array([0, 0, 0, 0], dtype=np.int8) for z in ZONE_IDS}
+    for t in range(1, 1001):
+        records = net.step(sensors.read(env.state, t), prev_actions)
+        marl_acts = _simple_healthy_marl(obs, loader, ambient)
+        if 200 <= t < 500:
+            del marl_acts["zone_2"]
+        res = fm.step(marl_acts, records, ambient=ambient)
+        obs, _, _, _, _ = env.step(res.actions)
+        prev_actions = res.actions
+
+        for z in ZONE_IDS:
+            s = env.state[z]
+            assert np.isfinite(s["T"]) and -10.0 <= s["T"] <= 60.0
+            assert np.isfinite(s["H"]) and 0.0 <= s["H"] <= 100.0
+            assert np.isfinite(s["M"]) and 0.0 <= s["M"] <= 100.0
+
+    assert fm.get_metrics()["zone_2"]["pid_fallback_steps"] >= 250
+    assert fm.get_metrics()["zone_2"]["recovery_successes"] >= 1
+    assert all(fm.get_metrics()[z]["safe_mode_events"] == 0 for z in ZONE_IDS)
+
+
+def test_phase6_full_acceptance_compound_sensor_pid_marl_fault_and_recovery(healthy_residuals, monkeypatch):
+    """
+    Phase 6 Step 4 Acceptance (A-E):
+    - A: 3-zone healthy operation under surrogate MARL
+    - B: Zone 2 MARL crash -> PID_FALLBACK; Zones 1 & 3 stay MARL_ACTIVE
+    - C: Zone 2 PID failure -> SAFE_MODE (0,0,0,0); Zones 1 & 3 keep running
+    - D: Zone 2 NaN/Inf sensor corruption isolated; Zones 1 & 3 unaffected; sensor recovers
+    - E: Restore Zone 2 sensor, PID, and MARL -> SAFE_MODE -> PID_FALLBACK -> RECOVERY_PENDING -> MARL_ACTIVE
+    """
+    params = PlaceholderParams()
+    env = GreenhouseEnv(params=params, max_steps=200)
+    obs, _ = env.reset(seed=10)
+    rng = np.random.default_rng(10)
+    faults = [
+        Fault("zone_2", "T", "nan", start=22, end=38),
+        Fault("zone_2", "H", "inf", start=22, end=38),
+    ]
+    sensors = NoisySensors(rng, faults=faults)
+    net = TrustNetwork(AssumedParams.from_env(params), healthy=healthy_residuals)
+    net.reset(sensors.read(env.state, 0))
+
+    fm, loader = _make_manager(supervisor_cfg=SupervisorConfig(N_confirm=5, safe_mode_retry_steps=2))
+    ambient = AmbientState(params.T_ambient, params.H_ambient)
+    z2_ctrl = fm.controllers["zone_2"]
+    orig_z2_step = z2_ctrl.step
+
+    prev_actions = {z: np.array([0, 0, 0, 0], dtype=np.int8) for z in ZONE_IDS}
+    z2_modes: list[ControlMode] = []
+
+    for t in range(1, 100):
+        records = net.step(sensors.read(env.state, t), prev_actions)
+        marl_acts = _simple_healthy_marl(obs, loader, ambient)
+
+        if 12 <= t < 40:
+            del marl_acts["zone_2"]
+        if t == 18:
+            monkeypatch.setattr(z2_ctrl, "step", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("z2 pid fault")))
+        if t == 38:
+            monkeypatch.setattr(z2_ctrl, "step", orig_z2_step)
+
+        res = fm.step(marl_acts, records, ambient=ambient)
+        z2_modes.append(res.statuses["zone_2"].mode)
+
+        # Zones 1 & 3 remain healthy in MARL_ACTIVE and uncontaminated throughout
+        assert res.statuses["zone_1"].mode == ControlMode.MARL_ACTIVE
+        assert res.statuses["zone_3"].mode == ControlMode.MARL_ACTIVE
+        assert np.isfinite(records["zone_1"]["T"].combined)
+        assert np.isfinite(records["zone_3"]["H"].combined)
+
+        if 12 <= t < 18:
+            assert res.statuses["zone_2"].mode == ControlMode.PID_FALLBACK
+        if 18 <= t < 38:
+            assert res.statuses["zone_2"].mode == ControlMode.SAFE_MODE
+            assert res.statuses["zone_2"].executed_action == (0, 0, 0, 0)
+
+        obs, _, _, _, _ = env.step(res.actions)
+        prev_actions = res.actions
+
+    # Trust in Zone 2 restores after t=38 and Zone 2 completes permitted recovery path to MARL_ACTIVE
+    assert records["zone_2"]["T"].trust > 0.85
+    assert records["zone_2"]["H"].trust > 0.85
+    assert res.statuses["zone_2"].mode == ControlMode.MARL_ACTIVE
+    transitions = fm.get_metrics()["zone_2"]["transitions"]
+    assert any(src == "SAFE_MODE" and dst == "PID_FALLBACK" for _, src, dst, _ in transitions)
+    assert any(src == "PID_FALLBACK" and dst == "RECOVERY_PENDING" for _, src, dst, _ in transitions)
+    assert any(src == "RECOVERY_PENDING" and dst == "MARL_ACTIVE" for _, src, dst, _ in transitions)
+
+
+def test_phase6_extended_operation_disturbances_and_metrics(healthy_residuals):
+    """Phase 6 Step 4F: 1200-step closed-loop run with ambient weather disturbance, sensor/MARL faults, and evaluator metrics."""
+    params = PlaceholderParams()
+    env = GreenhouseEnv(params=params, max_steps=1300)
+    obs, _ = env.reset(seed=10)
+    rng = np.random.default_rng(10)
+    faults = [Fault("zone_1", "T", "drift", start=200, magnitude=0.02, end=350)]
+    sensors = NoisySensors(rng, faults=faults)
+    assumed = AssumedParams.from_env(params)
+    net = TrustNetwork(assumed, healthy=healthy_residuals)
+    net.reset(sensors.read(env.state, 0))
+
+    loader = CropConfigLoader.from_json_file(DATASET_PATH)
+    loader.assign_zone("zone_1", "tomato", "vegetative")
+    loader.assign_zone("zone_2", "lettuce", "mature")
+    loader.assign_zone("zone_3", "cucumber", "flowering")
+    fm = FallbackManager(
+        crop_loader=loader,
+        pid_gains=load_pid_tuning(TUNING_PATH),
+        sensor_cfg=SensorInterfaceConfig(theta_trust_good=0.45, t_est_max={"T": 300, "H": 300, "M": 60}),
+        supervisor_cfg=SupervisorConfig(N_confirm=6, theta_recovery_trust=0.45),
+    )
+    evaluator = EpisodeEvaluator(dt=params.dt, fault_start_step=200)
+
+    prev_actions = {z: np.array([0, 0, 0, 0], dtype=np.int8) for z in ZONE_IDS}
+    z2_pid_water_streak = 0
+    max_z2_pid_water_streak = 0
+
+    for t in range(1, 1201):
+        # Coherent outdoor weather disturbance (cooler, more humid front) from t=600..850
+        if 600 <= t < 850:
+            params.T_ambient, params.H_ambient = 19.0, 58.0
+            assumed.T_ambient, assumed.H_ambient = 19.0, 58.0
+        else:
+            params.T_ambient, params.H_ambient = 24.0, 45.0
+            assumed.T_ambient, assumed.H_ambient = 24.0, 45.0
+        amb = AmbientState(params.T_ambient, params.H_ambient)
+
+        records = net.step(sensors.read(env.state, t), prev_actions)
+        marl_acts = _simple_healthy_marl(obs, loader, amb)
+        if 400 <= t < 750:
+            del marl_acts["zone_2"]
+
+        res = fm.step(marl_acts, records, ambient=amb, current_time=float(t))
+        if res.statuses["zone_2"].mode == ControlMode.PID_FALLBACK:
+            z2_pid_water_streak = z2_pid_water_streak + 1 if res.statuses["zone_2"].executed_action[3] == 1 else 0
+            max_z2_pid_water_streak = max(max_z2_pid_water_streak, z2_pid_water_streak)
+        else:
+            z2_pid_water_streak = 0
+
+        bounds_now = {z: loader.get_zone_targets(z) for z in ZONE_IDS}
+        evaluator.record_step(t, env.state, bounds_now, res.statuses)
+        obs, _, _, _, _ = env.step(res.actions)
+        prev_actions = res.actions
+
+    summary = evaluator.summarize(fm.get_metrics())
+    for z in ZONE_IDS:
+        for v in ("T", "H", "M"):
+            assert np.isfinite(summary[z]["variables"][v]["rmse"])
+            assert np.isfinite(summary[z]["variables"][v]["mae"])
+        assert summary[z]["switching_frequency_per_min"] >= 0.0
+
+    # Irrigation pulse limit (default water_max_pulse_steps=2) must never be exceeded in PID fallback
+    assert max_z2_pid_water_streak <= 2
+    assert fm.get_metrics()["zone_2"]["pid_fallback_steps"] >= 300
+    assert fm.get_metrics()["zone_2"]["recovery_successes"] >= 1
+
+
+def test_phase6_exact_reproducibility_with_identical_seeds(healthy_residuals):
+    """Phase 6 Step 4G: Identical seeds yield deterministic states, trust records, actions, and metrics."""
+
+    def _run_seeded(seed: int):
+        params = PlaceholderParams()
+        env = GreenhouseEnv(params=params, max_steps=150)
+        obs, _ = env.reset(seed=seed)
+        sensors = NoisySensors(np.random.default_rng(seed), faults=[Fault("zone_2", "T", "nan", start=20, end=35)])
+        net = TrustNetwork(AssumedParams.from_env(params), healthy=healthy_residuals)
+        net.reset(sensors.read(env.state, 0))
+        fm, loader = _make_manager(supervisor_cfg=SupervisorConfig(N_confirm=5))
+        evaluator = EpisodeEvaluator(dt=params.dt, fault_start_step=20)
+        ambient = AmbientState(params.T_ambient, params.H_ambient)
+        prev_actions = {z: np.array([0, 0, 0, 0], dtype=np.int8) for z in ZONE_IDS}
+        trace = []
+        for t in range(1, 100):
+            records = net.step(sensors.read(env.state, t), prev_actions)
+            marl_acts = _simple_healthy_marl(obs, loader, ambient)
+            if 40 <= t < 60:
+                del marl_acts["zone_2"]
+            res = fm.step(marl_acts, records, ambient=ambient, current_time=float(t))
+            bounds_now = {z: loader.get_zone_targets(z) for z in ZONE_IDS}
+            evaluator.record_step(t, env.state, bounds_now, res.statuses)
+            obs, _, _, _, _ = env.step(res.actions)
+            prev_actions = res.actions
+            trace.append((
+                {z: tuple(res.actions[z].tolist()) for z in ZONE_IDS},
+                {z: res.statuses[z].mode.value for z in ZONE_IDS},
+                {z: dict(env.state[z]) for z in ZONE_IDS},
+            ))
+        return trace, evaluator.summarize(fm.get_metrics())
+
+    t1, s1 = _run_seeded(101)
+    t2, s2 = _run_seeded(101)
+    assert t1 == t2
+    assert s1 == s2

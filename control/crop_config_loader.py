@@ -16,6 +16,7 @@ import math
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
+from control.pid_controller import validate_pid_gains
 from control.types import CropBounds, PIDGains, VARS, ZONE_IDS
 
 logger = logging.getLogger(__name__)
@@ -282,16 +283,21 @@ def load_pid_tuning(source: str | Path | Mapping[str, Any]) -> dict[str, dict[st
             if v not in z_cfg:
                 raise CropConfigError(f"PID tuning for '{z}' missing variable '{v}'")
             params = z_cfg[v]
-            out[z][v] = PIDGains(
-                Kp=float(params["Kp"]),
-                Ki=float(params["Ki"]),
-                Kd=float(params.get("Kd", 0.0)),
-                tau_f=float(params.get("tau_f", 2.0)),
-                T_t=float(params.get("T_t", 10.0)),
-                Ts=float(params.get("Ts", 1.0)),
-                dt=float(params.get("dt", 1.0)),
-                u_min=float(params.get("u_min", 0.0 if v == "M" else -1.0)),
-                u_max=float(params.get("u_max", 1.0)),
-                unidirectional_positive=bool(params.get("unidirectional_positive", v == "M")),
-            )
+            try:
+                gains = PIDGains(
+                    Kp=float(params["Kp"]),
+                    Ki=float(params["Ki"]),
+                    Kd=float(params.get("Kd", 0.0)),
+                    tau_f=float(params.get("tau_f", 2.0)),
+                    T_t=float(params.get("T_t", 10.0)),
+                    Ts=float(params.get("Ts", 1.0)),
+                    dt=float(params.get("dt", 1.0)),
+                    u_min=float(params.get("u_min", 0.0 if v == "M" else -1.0)),
+                    u_max=float(params.get("u_max", 1.0)),
+                    unidirectional_positive=bool(params.get("unidirectional_positive", v == "M")),
+                )
+                validate_pid_gains(gains)
+            except (TypeError, ValueError) as exc:
+                raise CropConfigError(f"Invalid PID tuning for '{z}.{v}': {exc}") from exc
+            out[z][v] = gains
     return out

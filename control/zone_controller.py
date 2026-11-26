@@ -5,10 +5,11 @@ ActuatorMapper, and ActuatorArbiter.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Mapping, Optional
 
-from control.actuator_arbiter import ActuatorArbiter, ArbitrationResult
-from control.actuator_mapper import ActuatorMapper
+from control.actuator_arbiter import ActuatorArbiter, ArbitrationResult, _validate_optional_finite
+from control.actuator_mapper import ActuatorMapper, validate_binary_action
 from control.pid_controller import PIDController
 from control.types import (
     ActuatorConfig,
@@ -17,6 +18,7 @@ from control.types import (
     CropBounds,
     PIDGains,
     SensorMeasurement,
+    VARS,
 )
 
 
@@ -37,16 +39,20 @@ class ZoneController:
     def __init__(
         self,
         zone_id: str,
-        gains: dict[str, PIDGains],
+        gains: Mapping[str, PIDGains],
         actuator_cfg: ActuatorConfig | None = None,
     ):
+        if not isinstance(zone_id, str) or not zone_id.strip():
+            raise ValueError(f"zone_id must be a non-empty string, got {zone_id!r}")
+        for v in VARS:
+            if v not in gains:
+                raise ValueError(f"Missing PIDGains for variable '{v}' in zone '{zone_id}'")
+
         self.zone_id = zone_id
         self.pids: dict[str, PIDController] = {
-            "T": PIDController("T", gains["T"]),
-            "H": PIDController("H", gains["H"]),
-            "M": PIDController("M", gains["M"]),
+            v: PIDController(v, replace(gains[v])) for v in VARS
         }
-        cfg = actuator_cfg or ActuatorConfig()
+        cfg = replace(actuator_cfg) if actuator_cfg is not None else ActuatorConfig()
         self.mapper = ActuatorMapper(cfg)
         self.arbiter = ActuatorArbiter(cfg)
         self._last_blocks = ArbitrationBlockFlags()
@@ -58,22 +64,53 @@ class ZoneController:
         self.arbiter.reset()
         self._last_blocks = ArbitrationBlockFlags()
 
+    def _validate_inputs(
+        self,
+        measurements: Mapping[str, SensorMeasurement],
+        bounds: Mapping[str, CropBounds],
+        ambient: AmbientState,
+    ) -> tuple[Optional[float], Optional[float]]:
+        for v in VARS:
+            if v not in measurements:
+                raise ValueError(f"Zone '{self.zone_id}' missing measurement for '{v}'")
+            if v not in bounds:
+                raise ValueError(f"Zone '{self.zone_id}' missing crop bounds for '{v}'")
+        if not isinstance(ambient, AmbientState):
+            raise TypeError(f"Expected AmbientState, got {type(ambient).__name__}")
+        amb_T = _validate_optional_finite(ambient.T_ambient, "ambient.T_ambient")
+        amb_H = _validate_optional_finite(ambient.H_ambient, "ambient.H_ambient")
+        return amb_T, amb_H
+
     def step(
         self,
-        measurements: dict[str, SensorMeasurement],
-        bounds: dict[str, CropBounds],
+        measurements: Mapping[str, SensorMeasurement],
+        bounds: Mapping[str, CropBounds],
         ambient: AmbientState,
+        dt: Optional[float] = None,
     ) -> ZoneControlOutput:
         """Run one active PID + Mapper + Arbiter control step."""
+        self._validate_inputs(measurements, bounds, ambient)
         b = self._last_blocks
         u_T = self.pids["T"].step(
-            measurements["T"], bounds["T"], block_positive=b.block_T_pos, block_negative=b.block_T_neg
+            measurements["T"],
+            bounds["T"],
+            block_positive=b.block_T_pos,
+            block_negative=b.block_T_neg,
+            dt=dt,
         )
         u_H = self.pids["H"].step(
-            measurements["H"], bounds["H"], block_positive=b.block_H_pos, block_negative=b.block_H_neg
+            measurements["H"],
+            bounds["H"],
+            block_positive=b.block_H_pos,
+            block_negative=b.block_H_neg,
+            dt=dt,
         )
         u_M = self.pids["M"].step(
-            measurements["M"], bounds["M"], block_positive=b.block_M_pos, block_negative=False
+            measurements["M"],
+            bounds["M"],
+            block_positive=b.block_M_pos,
+            block_negative=False,
+            dt=dt,
         )
 
         reqs = self.mapper.map_outputs(u_T, u_H, u_M)
@@ -96,8 +133,8 @@ class ZoneController:
 
     def track_shadow(
         self,
-        measurements: dict[str, SensorMeasurement],
-        bounds: dict[str, CropBounds],
+        measurements: Mapping[str, SensorMeasurement],
+        bounds: Mapping[str, CropBounds],
         executed_action: tuple[int, int, int, int],
         ambient: AmbientState,
     ) -> None:
@@ -105,22 +142,25 @@ class ZoneController:
         Keep PID internal states and actuator dwell timers synchronized with
         MARL/SAFE_MODE executed actions for bumpless handover.
         """
-        heat, fan, mist, water = executed_action
-        self.mapper.sync_executed(executed_action)
+        amb_T, amb_H = self._validate_inputs(measurements, bounds, ambient)
+        heat, fan, mist, water = validate_binary_action(executed_action)
+
+        T_val = _validate_optional_finite(measurements["T"].value, "measurements['T'].value")
+        H_val = _validate_optional_finite(measurements["H"].value, "measurements['H'].value")
+        _validate_optional_finite(measurements["M"].value, "measurements['M'].value")
+
+        self.mapper.sync_executed((heat, fan, mist, water))
         self.arbiter.sync_fan(fan)
 
         # Infer effective signed effort applied to each variable by MARL
-        T_val = measurements["T"].value
-        H_val = measurements["H"].value
-
         eff_T = 1.0 if heat else 0.0
-        if fan and not heat and T_val is not None and ambient.T_ambient is not None:
-            if T_val > ambient.T_ambient:
+        if fan and not heat and T_val is not None and amb_T is not None:
+            if T_val > amb_T:
                 eff_T = -1.0
 
         eff_H = 1.0 if mist else 0.0
-        if fan and not mist and H_val is not None and ambient.H_ambient is not None:
-            if H_val > ambient.H_ambient:
+        if fan and not mist and H_val is not None and amb_H is not None:
+            if H_val > amb_H:
                 eff_H = -1.0
 
         eff_M = 1.0 if water else 0.0

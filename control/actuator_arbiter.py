@@ -10,9 +10,15 @@ or dehumidifying.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
-from control.actuator_mapper import DwellTracker, MappedRequests
+from control.actuator_mapper import (
+    DwellTracker,
+    MappedRequests,
+    _validate_binary_bit,
+    _validate_finite_float,
+    validate_actuator_config,
+)
 from control.types import (
     ActuatorConfig,
     AmbientState,
@@ -29,6 +35,37 @@ class ArbitrationResult:
     action: tuple[int, int, int, int]  # (heat, fan, mist, water)
     block_flags: ArbitrationBlockFlags
     reason: str
+
+
+def _validate_optional_finite(val: Any, name: str) -> Optional[float]:
+    if val is None:
+        return None
+    return _validate_finite_float(val, name)
+
+
+def _validate_bounds_finite(bounds: CropBounds, name: str) -> None:
+    if not isinstance(bounds, CropBounds):
+        raise TypeError(f"Expected CropBounds for {name}, got {type(bounds).__name__}")
+    min_a = _validate_finite_float(bounds.min_acceptable, f"{name}.min_acceptable")
+    opt_min = _validate_finite_float(bounds.optimal_min, f"{name}.optimal_min")
+    opt_max = _validate_finite_float(bounds.optimal_max, f"{name}.optimal_max")
+    max_a = _validate_finite_float(bounds.max_acceptable, f"{name}.max_acceptable")
+    if opt_min > opt_max or min_a > max_a:
+        raise ValueError(f"Invalid bounds ordering in {name}")
+
+
+def _validate_mapped_requests(req: MappedRequests) -> None:
+    if not isinstance(req, MappedRequests):
+        raise TypeError(f"Expected MappedRequests, got {type(req).__name__}")
+    _validate_binary_bit(req.heat_cmd, "req.heat_cmd")
+    _validate_binary_bit(req.mist_cmd, "req.mist_cmd")
+    _validate_binary_bit(req.water_cmd, "req.water_cmd")
+    for fname in ("cool_demand", "heat_assist_demand", "dehum_demand", "hum_assist_demand"):
+        d = _validate_finite_float(getattr(req, fname), f"req.{fname}")
+        if not (0.0 <= d <= 1.0):
+            raise ValueError(f"req.{fname} must be within [0.0, 1.0], got {d}")
+    if not isinstance(req.water_soak_blocked, bool):
+        raise ValueError(f"req.water_soak_blocked must be bool, got {type(req.water_soak_blocked).__name__}")
 
 
 def _normalized_excursion(val: Optional[float], bounds: CropBounds) -> float:
@@ -55,6 +92,7 @@ class ActuatorArbiter:
 
     def __init__(self, cfg: ActuatorConfig | None = None):
         self.cfg = cfg or ActuatorConfig()
+        validate_actuator_config(self.cfg)
         self.fan_dwell = DwellTracker(self.cfg.min_on_steps, self.cfg.min_off_steps)
         self._last_fan_decision: int = 0
 
@@ -63,8 +101,9 @@ class ActuatorArbiter:
         self._last_fan_decision = 0
 
     def sync_fan(self, actual_fan: int) -> None:
-        self.fan_dwell.sync_external(actual_fan)
-        self._last_fan_decision = 1 if actual_fan else 0
+        fan_bit = _validate_binary_bit(actual_fan, "actual_fan")
+        self.fan_dwell.sync_external(fan_bit)
+        self._last_fan_decision = fan_bit
 
     def _evaluate_fan_utility(
         self,
@@ -121,15 +160,23 @@ class ActuatorArbiter:
         bounds_H: CropBounds,
         ambient: AmbientState,
     ) -> ArbitrationResult:
+        _validate_mapped_requests(req)
+        _validate_bounds_finite(bounds_T, "bounds_T")
+        _validate_bounds_finite(bounds_H, "bounds_H")
+        if not isinstance(ambient, AmbientState):
+            raise TypeError(f"Expected AmbientState, got {type(ambient).__name__}")
+        amb_T = _validate_optional_finite(ambient.T_ambient, "ambient.T_ambient")
+        amb_H = _validate_optional_finite(ambient.H_ambient, "ambient.H_ambient")
+        T_val = _validate_optional_finite(meas_T.value, "meas_T.value")
+        H_val = _validate_optional_finite(meas_H.value, "meas_H.value")
+
         c = self.cfg
-        T_val = meas_T.value
-        H_val = meas_H.value
 
         u_T_util, u_T_str, T_amb_blocked = self._evaluate_fan_utility(
             req.heat_assist_demand,
             req.cool_demand,
             T_val,
-            ambient.T_ambient,
+            amb_T,
             c.ambient_margin_T,
             active_actuator_on=(req.heat_cmd == 1),
         )
@@ -137,7 +184,7 @@ class ActuatorArbiter:
             req.hum_assist_demand,
             req.dehum_demand,
             H_val,
-            ambient.H_ambient,
+            amb_H,
             c.ambient_margin_H,
             active_actuator_on=(req.mist_cmd == 1),
         )

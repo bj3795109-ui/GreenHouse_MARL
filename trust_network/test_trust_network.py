@@ -168,3 +168,195 @@ def test_belief_is_not_worse_than_combined_when_model_is_wrong(healthy):
             e[k].append(np.mean([abs(getattr(r[z]["T"], k) - tt[z]["T"])
                                  for r, tt in zip(lg[100:], t[100:]) for z in ZONE_IDS]))
     assert np.mean(e["belief"]) <= np.mean(e["combined"]) * 1.05
+
+
+# --- Phase 4: NaN/Inf isolation, multi-fault, recovery (TRUST-01..TRUST-07) -
+
+def test_trust01_valid_readings_across_all_three_zones(healthy):
+    log = rollout(make_net(healthy=healthy), steps=120, seed=5)
+    last = log[-1]
+    for z in ZONE_IDS:
+        for v in VARS:
+            r = last[z][v]
+            assert np.isfinite(r.raw)
+            assert np.isfinite(r.combined)
+            assert np.isfinite(r.belief)
+            assert r.trust > 0.85
+            assert r.raw_weight == pytest.approx(r.trust)
+            if v in ("T", "H"):
+                assert r.conf_cz is not None and np.isfinite(r.conf_cz)
+
+
+def test_trust02_nan_temperature_in_zone2_rejected_and_isolated(healthy):
+    p = AssumedParams.from_env(PlaceholderParams())
+    u = dict(heat=False, fan=False, mist=False, water=False)
+    with pytest.raises(ValueError):
+        estimate_cz("T", 24.5, u, [RawReading(float("nan")), RawReading(25.0)], p)
+
+    faults = [Fault("zone_2", "T", "nan", start=50, end=100)]
+    base = rollout(make_net(healthy=healthy), steps=120, seed=2)
+    log = rollout(make_net(healthy=healthy), steps=120, seed=2, faults=faults)
+
+    # rollout() logs t=1..steps at indices 0..steps-1, so active [50, 100) is log[49:99]
+    for b, r in zip(base[49:99], log[49:99]):
+        z2 = r["zone_2"]["T"]
+        assert np.isnan(z2.raw)
+        assert z2.raw_weight == 0.0
+        assert z2.match == 0.0
+        assert np.isfinite(z2.est_act)
+        assert np.isfinite(z2.combined)
+        assert np.isfinite(z2.belief)
+        assert z2.belief == pytest.approx(z2.combined)
+
+        # Zones 1 and 3 must remain completely uncontaminated
+        for z_ok in ("zone_1", "zone_3"):
+            rok = r[z_ok]["T"]
+            assert np.isfinite(rok.combined)
+            assert np.isfinite(rok.belief)
+            assert rok.conf_cz is not None and np.isfinite(rok.conf_cz)
+            assert abs(rok.trust - b[z_ok]["T"].trust) < 0.15
+
+    assert log[98]["zone_2"]["T"].trust < 0.05
+
+
+def test_infinite_humidity_in_zone1_rejected_and_isolated(healthy):
+    faults = [Fault("zone_1", "H", "inf", start=40, magnitude=1.0, end=90)]
+    base = rollout(make_net(healthy=healthy), steps=110, seed=3)
+    log = rollout(make_net(healthy=healthy), steps=110, seed=3, faults=faults)
+
+    for b, r in zip(base[39:89], log[39:89]):
+        z1 = r["zone_1"]["H"]
+        assert np.isinf(z1.raw)
+        assert z1.raw_weight == 0.0
+        assert z1.match == 0.0
+        assert np.isfinite(z1.combined)
+        assert np.isfinite(z1.belief)
+        assert z1.belief == pytest.approx(z1.combined)
+
+        for z_ok in ("zone_2", "zone_3"):
+            rok = r[z_ok]["H"]
+            assert np.isfinite(rok.combined)
+            assert np.isfinite(rok.belief)
+            assert rok.conf_cz is not None and np.isfinite(rok.conf_cz)
+            assert abs(rok.trust - b[z_ok]["H"].trust) < 0.15
+
+
+def test_multiple_invalid_variables_in_one_zone_keeps_valid_var_and_other_zones_healthy(healthy):
+    faults = [
+        Fault("zone_2", "T", "nan", start=30, end=80),
+        Fault("zone_2", "H", "inf", start=30, magnitude=-1.0, end=80),
+    ]
+    base = rollout(make_net(healthy=healthy), steps=100, seed=4)
+    log = rollout(make_net(healthy=healthy), steps=100, seed=4, faults=faults)
+
+    for b, r in zip(base[29:79], log[29:79]):
+        # Invalid T and H in zone_2 stay finite in combined/belief
+        assert np.isfinite(r["zone_2"]["T"].combined)
+        assert np.isfinite(r["zone_2"]["H"].combined)
+        assert r["zone_2"]["T"].raw_weight == 0.0
+        assert r["zone_2"]["H"].raw_weight == 0.0
+        # Valid M in zone_2 continues operating normally
+        assert np.isfinite(r["zone_2"]["M"].raw)
+        assert r["zone_2"]["M"].trust == pytest.approx(b["zone_2"]["M"].trust)
+        # Zones 1 and 3 unaffected
+        for z_ok in ("zone_1", "zone_3"):
+            for v in VARS:
+                assert np.isfinite(r[z_ok][v].combined)
+                assert abs(r[z_ok][v].trust - b[z_ok][v].trust) < 0.15
+
+
+def test_all_sensors_invalid_in_one_zone_isolated_from_healthy_zones(healthy):
+    faults = [
+        Fault("zone_2", "T", "nan", start=30, end=90),
+        Fault("zone_2", "H", "inf", start=30, end=90),
+        Fault("zone_2", "M", "nan", start=30, end=90),
+    ]
+    base = rollout(make_net(healthy=healthy), steps=100, seed=6)
+    log = rollout(make_net(healthy=healthy), steps=100, seed=6, faults=faults)
+
+    for b, r in zip(base[29:89], log[29:89]):
+        for v in VARS:
+            z2 = r["zone_2"][v]
+            assert z2.raw_weight == 0.0
+            assert z2.match == 0.0
+            assert np.isfinite(z2.combined)
+            assert np.isfinite(z2.belief)
+        for z_ok in ("zone_1", "zone_3"):
+            for v in VARS:
+                rok = r[z_ok][v]
+                assert np.isfinite(rok.combined)
+                assert np.isfinite(rok.belief)
+                assert abs(rok.trust - b[z_ok][v].trust) < 0.15
+
+    for v in VARS:
+        assert log[88]["zone_2"][v].trust < 0.05
+
+
+def test_trust03_sudden_jump_spike_degrades_trust(healthy):
+    faults = [Fault("zone_1", "T", "spike", start=50, magnitude=15.0, end=80)]
+    log = rollout(make_net(healthy=healthy), steps=100, seed=8, faults=faults)
+    assert log[48]["zone_1"]["T"].trust > 0.8
+    assert log[78]["zone_1"]["T"].match == 0.0
+    assert log[78]["zone_1"]["T"].trust < 0.1
+
+
+def test_trust04_missing_or_dropped_readings_handled_predictably(healthy):
+    net = make_net(healthy=healthy)
+    base = {z: {v: RawReading(24.0 if v == "T" else 50.0) for v in VARS} for z in ZONE_IDS}
+    net.reset(base)
+    acts = {z: [0, 0, 0, 0] for z in ZONE_IDS}
+
+    # Zone 2 drops all transmissions (missing keys & RawReading(None))
+    partial = {
+        "zone_1": base["zone_1"],
+        "zone_2": {"T": RawReading(None)},
+        "zone_3": base["zone_3"],
+    }
+    rec = net.step(partial, acts)
+    for v in VARS:
+        assert rec["zone_2"][v].raw_weight == 0.0
+        assert rec["zone_2"][v].match == 0.0
+        assert np.isfinite(rec["zone_2"][v].combined)
+        assert np.isfinite(rec["zone_2"][v].belief)
+    assert np.isfinite(rec["zone_1"]["T"].combined)
+    assert np.isfinite(rec["zone_3"]["T"].combined)
+
+
+def test_trust06_gradual_recovery_after_valid_readings_resume(healthy):
+    faults = [Fault("zone_2", "T", "nan", start=40, end=100)]
+    log = rollout(make_net(healthy=healthy), steps=200, seed=9, faults=faults)
+
+    trust_at_end_of_fault = log[98]["zone_2"]["T"].trust   # t=99 (last fault step)
+    trust_first_valid = log[99]["zone_2"]["T"].trust       # t=100 (first valid step)
+    trust_final = log[-1]["zone_2"]["T"].trust
+
+    assert trust_at_end_of_fault < 0.05
+    # Must recover gradually via EMA, not jump straight to 1.0 on the first valid sample
+    assert trust_first_valid < 0.3
+    assert trust_first_valid > trust_at_end_of_fault
+    assert trust_final > 0.85
+
+
+def test_trust07_all_sensors_invalid_at_cold_start_and_cold_recovery():
+    net = make_net()
+    bad_init = {z: {v: RawReading(float("nan")) for v in VARS} for z in ZONE_IDS}
+    net.reset(bad_init)
+    acts = {z: [0, 0, 0, 0] for z in ZONE_IDS}
+
+    # Without any valid reading or prior anchor, TrustNetwork refuses to fabricate plausible values
+    r1 = net.step(bad_init, acts)
+    for z in ZONE_IDS:
+        for v in VARS:
+            assert np.isnan(r1[z][v].combined)
+            assert np.isnan(r1[z][v].belief)
+            assert r1[z][v].trust == pytest.approx(net.cfg.trust_floor)
+            assert r1[z][v].raw_weight == 0.0
+
+    # Once valid readings arrive, cold-anchor cleanly and begin gradual trust recovery
+    good = {z: {v: RawReading(24.0 if v == "T" else 50.0) for v in VARS} for z in ZONE_IDS}
+    r2 = net.step(good, acts)
+    for z in ZONE_IDS:
+        for v in VARS:
+            assert np.isfinite(r2[z][v].combined)
+            assert np.isfinite(r2[z][v].belief)
+            assert net.cfg.trust_floor < r2[z][v].trust < 0.5
