@@ -1,0 +1,41 @@
+{
+  "notes": "Provisional baseline PID gains for PlaceholderParams in env/env.py. Recalibrate after physical plant identification.",
+  "default": {
+    "T": {
+      "Kp": 0.40,
+      "Ki": 0.002,
+      "Kd": 2.0,
+      "tau_f": 5.0,
+      "T_t": 20.0,
+      "Ts": 1.0,
+      "dt": 1.0,
+      "u_min": -1.0,
+      "u_max": 1.0,
+      "unidirectional_positive": false
+    },
+    "H": {
+      "Kp": 0.12,
+      "Ki": 0.005,
+      "Kd": 0.0,
+      "tau_f": 2.0,
+      "T_t": 10.0,
+      "Ts": 1.0,
+      "dt": 1.0,
+      "u_min": -1.0,
+      "u_max": 1.0,
+      "unidirectional_positive": false
+    },
+    "M": {
+      "Kp": 0.10,
+      "Ki": 0.004,
+      "Kd": 0.0,
+      "tau_f": 2.0,
+      "T_t": 10.0,
+      "Ts": 1.0,
+      "dt": 1.0,
+      "u_min": 0.0,
+      "u_max": 1.0,
+      "unidirectional_positive": true
+    }
+  }
+}

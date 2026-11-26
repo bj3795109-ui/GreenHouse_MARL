@@ -1,0 +1,16 @@
+{
+  "zones": {
+    "zone_1": {
+      "crop_id": "tomato",
+      "growth_stage": "vegetative"
+    },
+    "zone_2": {
+      "crop_id": "lettuce",
+      "growth_stage": "mature"
+    },
+    "zone_3": {
+      "crop_id": "cucumber",
+      "growth_stage": "flowering"
+    }
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "schema_version": "1.0",
+  "dataset_source": "Horticultural Reference Setpoints (illustrative; confirm M physical unit before hardware deployment)",
+  "soil_moisture_basis": "relative_percent (provisional placeholder matching env.py 0-100 scale)",
+  "canonical_units": {
+    "T": "degC",
+    "H": "RH_percent",
+    "M": "relative_percent"
+  },
+  "crops": {
+    "tomato": {
+      "display_name": "Tomato (Solanum lycopersicum)",
+      "stages": {
+        "seedling": {
+          "T": {"unit": "degC", "min_acceptable": 18.0, "optimal_min": 22.0, "optimal_max": 26.0, "max_acceptable": 30.0},
+          "H": {"unit": "RH_percent", "min_acceptable": 55.0, "optimal_min": 65.0, "optimal_max": 80.0, "max_acceptable": 90.0},
+          "M": {"unit": "relative_percent", "min_acceptable": 30.0, "optimal_min": 45.0, "optimal_max": 60.0, "max_acceptable": 75.0}
+        },
+        "vegetative": {
+          "T": {"unit": "degC", "min_acceptable": 16.0, "optimal_min": 21.0, "optimal_max": 26.0, "max_acceptable": 32.0},
+          "H": {"unit": "RH_percent", "min_acceptable": 45.0, "optimal_min": 60.0, "optimal_max": 75.0, "max_acceptable": 85.0},
+          "M": {"unit": "relative_percent", "min_acceptable": 25.0, "optimal_min": 40.0, "optimal_max": 55.0, "max_acceptable": 70.0}
+        },
+        "flowering": {
+          "T": {"unit": "degC", "min_acceptable": 16.0, "optimal_min": 20.0, "optimal_max": 25.0, "max_acceptable": 30.0},
+          "H": {"unit": "RH_percent", "min_acceptable": 45.0, "optimal_min": 55.0, "optimal_max": 70.0, "max_acceptable": 80.0},
+          "M": {"unit": "relative_percent", "min_acceptable": 25.0, "optimal_min": 38.0, "optimal_max": 52.0, "max_acceptable": 68.0}
+        }
+      }
+    },
+    "lettuce": {
+      "display_name": "Lettuce (Lactuca sativa)",
+      "stages": {
+        "vegetative": {
+          "T": {"unit": "degC", "min_acceptable": 12.0, "optimal_min": 17.0, "optimal_max": 22.0, "max_acceptable": 26.0},
+          "H": {"unit": "RH_percent", "min_acceptable": 45.0, "optimal_min": 55.0, "optimal_max": 70.0, "max_acceptable": 85.0},
+          "M": {"unit": "relative_percent", "min_acceptable": 35.0, "optimal_min": 50.0, "optimal_max": 65.0, "max_acceptable": 80.0}
+        },
+        "mature": {
+          "T": {"unit": "degC", "min_acceptable": 10.0, "optimal_min": 15.0, "optimal_max": 20.0, "max_acceptable": 24.0},
+          "H": {"unit": "RH_percent", "min_acceptable": 40.0, "optimal_min": 50.0, "optimal_max": 65.0, "max_acceptable": 80.0},
+          "M": {"unit": "relative_percent", "min_acceptable": 30.0, "optimal_min": 45.0, "optimal_max": 60.0, "max_acceptable": 75.0}
+        }
+      }
+    },
+    "cucumber": {
+      "display_name": "Cucumber (Cucumis sativus)",
+      "stages": {
+        "vegetative": {
+          "T": {"unit": "degC", "min_acceptable": 18.0, "optimal_min": 22.0, "optimal_max": 27.0, "max_acceptable": 33.0},
+          "H": {"unit": "RH_percent", "min_acceptable": 55.0, "optimal_min": 65.0, "optimal_max": 80.0, "max_acceptable": 90.0},
+          "M": {"unit": "relative_percent", "min_acceptable": 35.0, "optimal_min": 45.0, "optimal_max": 60.0, "max_acceptable": 75.0}
+        },
+        "flowering": {
+          "T": {"unit": "degC", "min_acceptable": 18.0, "optimal_min": 23.0, "optimal_max": 28.0, "max_acceptable": 34.0},
+          "H": {"unit": "RH_percent", "min_acceptable": 50.0, "optimal_min": 60.0, "optimal_max": 75.0, "max_acceptable": 85.0},
+          "M": {"unit": "relative_percent", "min_acceptable": 30.0, "optimal_min": 42.0, "optimal_max": 58.0, "max_acceptable": 72.0}
+        }
+      }
+    }
+  }
+}
