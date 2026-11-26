@@ -18,8 +18,8 @@ Light is not in the env yet, so it is not here yet.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import math
+from dataclasses import dataclass, field
 import numpy as np
 
 ZONE_IDS = ["zone_1", "zone_2", "zone_3"]
@@ -51,7 +51,12 @@ def _is_valid_raw_reading(item) -> bool:
 
 @dataclass(frozen=True)
 class RawReading:
-    value: float
+    """One sensor sample. value is None (or non-finite) for a dropout."""
+    value: float | None
+
+
+def _missing(r: "RawReading") -> bool:
+    return r.value is None or not math.isfinite(r.value)
 
 
 @dataclass(frozen=True)
@@ -257,7 +262,7 @@ class HealthyResiduals:
 
 @dataclass
 class TrustRecord:
-    raw: float
+    raw: float | None
     est_cz: float | None
     est_act: float
     conf_cz: float | None
@@ -272,30 +277,57 @@ class TrustRecord:
 
 
 class TrustNetwork:
-    def __init__(self, assumed: AssumedParams, healthy: HealthyResiduals | None = None,
-                 cfg: TrustConfig | None = None):
+    def __init__(
+        self,
+        assumed: AssumedParams,
+        healthy: HealthyResiduals | None = None,
+        cfg: TrustConfig | None = None,
+    ):
         self.p = assumed
         self.healthy = healthy
         self.cfg = cfg or TrustConfig()
 
-    def _extract_raw_item(self, raw: dict, z: str, v: str) -> tuple[bool, float]:
-        item = (raw.get(z) or {}).get(v) if isinstance(raw, dict) else None
-        if item is not None and not isinstance(item, RawReading):
+    def _extract_raw_item(
+        self, raw: dict, z: str, v: str
+    ) -> tuple[str, float | None]:
+
+        zone_data = raw.get(z) if isinstance(raw, dict) else None
+        item = zone_data.get(v) if isinstance(zone_data, dict) else None
+
+        if item is None:
+            return "missing", None
+
+        if not isinstance(item, RawReading):
             raise TypeError(
-                f"TrustNetwork requires RawReading inputs, got {type(item).__name__} for {z}.{v}. "
-                f"Raw-in/trust-gates-out invariant (V1.1 §4.1)."
+                f"TrustNetwork requires RawReading inputs, got "
+                f"{type(item).__name__} for {z}.{v}. "
+                "Raw-in/trust-gates-out invariant (V1.1 §4.1)."
             )
-        if _is_valid_raw_reading(item):
-            return True, float(item.value)
-        if isinstance(item, RawReading) and not isinstance(item.value, bool):
-            try:
-                return False, float(item.value)
-            except (TypeError, ValueError):
-                pass
-        return False, float("nan")
+
+        if item.value is None:
+            return "missing", None
+
+        if isinstance(item.value, bool):
+            return "invalid", float("nan")
+
+        try:
+            value = float(item.value)
+        except (TypeError, ValueError):
+            return "invalid", float("nan")
+
+        if not math.isfinite(value):
+            return "invalid", value
+
+        return "valid", value
 
     def reset(self, raw: dict):
-        """raw[zone][var] -> RawReading. Cold start: anchor estimates on first valid raw reading."""
+        """
+        Initialize the network.
+
+        Missing initial readings are rejected.
+        Non-finite readings are allowed but remain unanchored.
+        """
+
         self.prev_raw = {z: {} for z in ZONE_IDS}
         self._raw_valid = {z: {} for z in ZONE_IDS}
         self.est = {z: {} for z in ZONE_IDS}
@@ -304,64 +336,131 @@ class TrustNetwork:
 
         for z in ZONE_IDS:
             for v in VARS:
-                ok, val = self._extract_raw_item(raw, z, v)
-                if ok:
+
+                status, val = self._extract_raw_item(raw, z, v)
+
+                if status == "missing":
+                    raise ValueError(
+                        f"Missing initial sensor reading for {z}.{v}"
+                    )
+
+                if status == "valid":
                     self.prev_raw[z][v] = RawReading(val)
                     self._raw_valid[z][v] = True
+
                     self.est[z][v] = val
                     self._est_valid[z][v] = True
+
                     self.trust[z][v] = self.cfg.init_trust
+
                 else:
-                    self.prev_raw[z][v] = RawReading(float("nan"))
+                    self.prev_raw[z][v] = RawReading(val)
                     self._raw_valid[z][v] = False
+
                     self.est[z][v] = float("nan")
                     self._est_valid[z][v] = False
+
                     self.trust[z][v] = self.cfg.trust_floor
 
     def step(self, raw: dict, actions: dict) -> dict:
         """
-        raw: readings at time t. actions: the actions applied during the step
-        that PRODUCED these readings (i.e. what you passed to env.step).
-        Neighbor trust used for confidence is last step's (no same-step loop).
+        Process one timestep.
 
-        Invalid raw readings (NaN/Inf/missing) are rejected before fusion,
-        residual matching, belief blending, and neighbor cross-zone coupling so
-        one zone's faulty sensor cannot contaminate healthy neighbors.
+        Valid readings:
+          - Participate in trust evaluation and belief blending.
+          - Update the trust EMA.
+
+        Invalid readings (NaN/Inf):
+          - Are excluded from fusion and cross-zone coupling.
+          - Decrease trust.
+          - Preserve their original value in TrustRecord.raw.
+
+        Missing readings (dropout):
+          - Are excluded from fusion and cross-zone coupling.
+          - Do not change trust.
+          - Are represented by None in TrustRecord.raw.
+
+        Estimates continue propagating from previous valid estimates.
         """
+
         cfg, p = self.cfg, self.p
+
         u = {
-            z: dict(heat=bool(a[0]), fan=bool(a[1]), mist=bool(a[2]), water=bool(a[3]))
+            z: {
+                "heat": bool(a[0]),
+                "fan": bool(a[1]),
+                "mist": bool(a[2]),
+                "water": bool(a[3]),
+            }
             for z, a in actions.items()
         }
 
-        parsed_raw = {z: {v: self._extract_raw_item(raw, z, v) for v in VARS} for z in ZONE_IDS}
+        parsed_raw = {
+            z: {
+                v: self._extract_raw_item(raw, z, v)
+                for v in VARS
+            }
+            for z in ZONE_IDS
+        }
 
         records = {}
+
         new_est = {z: {} for z in ZONE_IDS}
         new_est_valid = {z: {} for z in ZONE_IDS}
+
         new_trust = {z: {} for z in ZONE_IDS}
+
         new_prev_raw = {z: {} for z in ZONE_IDS}
         new_raw_valid = {z: {} for z in ZONE_IDS}
 
         for z in ZONE_IDS:
             records[z] = {}
+
             for v in VARS:
-                raw_ok, raw_val = parsed_raw[z][v]
+
+                raw_status, raw_val = parsed_raw[z][v]
+
+                raw_ok = raw_status == "valid"
+                raw_missing = raw_status == "missing"
+                raw_invalid = raw_status == "invalid"
+
                 est_ok = self._est_valid[z][v]
 
+                # ======================================================
+                # Existing valid estimate
+                # ======================================================
+
                 if est_ok:
+
                     prev = self.est[z][v]
+
                     act = estimate_act(v, prev, u[z], p)
 
+                    # --------------------------------------------------
+                    # Cross-zone estimation
+                    # --------------------------------------------------
+
                     if v in CZ_VARS:
+
                         nb_prev = [
                             self.prev_raw[n][v]
                             for n in NEIGHBORS[z]
-                            if self._raw_valid[n][v]
+                            if (
+                                self._raw_valid[n][v]
+                                and parsed_raw[n][v][0] == "valid"
+                            )
                         ]
-                        cz = estimate_cz(v, prev, u[z], nb_prev, p) if nb_prev else None
+
+                        cz = (
+                            estimate_cz(
+                                v, prev, u[z], nb_prev, p
+                            )
+                            if nb_prev
+                            else None
+                        )
 
                         if cz is not None and raw_ok:
+
                             valid_confs = [
                                 confidence_cz(
                                     v,
@@ -372,43 +471,120 @@ class TrustNetwork:
                                     cfg,
                                 )
                                 for n in NEIGHBORS[z]
-                                if parsed_raw[n][v][0]
+                                if parsed_raw[n][v][0] == "valid"
+                                and self._raw_valid[n][v]
                             ]
-                            conf_cz = float(np.mean(valid_confs)) if valid_confs else 0.0
-                            combined, w = fuse(cz, conf_cz, act, cfg.conf_act[v], cfg.eps)
+
+                            conf_cz = (
+                                float(np.mean(valid_confs))
+                                if valid_confs
+                                else 0.0
+                            )
+
+                            combined, w = fuse(
+                                cz,
+                                conf_cz,
+                                act,
+                                cfg.conf_act[v],
+                                cfg.eps,
+                            )
+
                         elif cz is not None:
+
                             conf_cz = 0.0
-                            combined, w = fuse(cz, 0.0, act, cfg.conf_act[v], cfg.eps)
+
+                            combined, w = fuse(
+                                cz,
+                                0.0,
+                                act,
+                                cfg.conf_act[v],
+                                cfg.eps,
+                            )
+
                         else:
+
                             conf_cz = None
                             w = None
                             combined = act
+
                     else:
-                        cz = conf_cz = w = None
+
+                        cz = None
+                        conf_cz = None
+                        w = None
+
                         combined = act
 
+                    # --------------------------------------------------
+                    # Valid current reading
+                    # --------------------------------------------------
+
                     if raw_ok:
+
                         residual = abs(raw_val - combined)
+
                         match = (
                             1.0
                             if self.healthy is None
-                            else self.healthy.match_score(v, residual, cfg.tail_ref)
+                            else self.healthy.match_score(
+                                v,
+                                residual,
+                                cfg.tail_ref,
+                            )
                         )
-                        tr = (1.0 - cfg.alpha_trust) * self.trust[z][v] + cfg.alpha_trust * match
-                        tr = float(np.clip(tr, cfg.trust_floor, 1.0))
-                        raw_weight = tr
-                        # belief = trust-gated blend of raw and combined; estimator anchors stay on `combined`
-                        belief = tr * raw_val + (1.0 - tr) * combined
-                    else:
-                        residual = float("nan")
-                        match = 0.0
+
+                        tr = (
+                            (1.0 - cfg.alpha_trust)
+                            * self.trust[z][v]
+                            + cfg.alpha_trust * match
+                        )
+
                         tr = float(
                             np.clip(
-                                (1.0 - cfg.alpha_trust) * self.trust[z][v],
+                                tr,
                                 cfg.trust_floor,
                                 1.0,
                             )
                         )
+
+                        raw_weight = tr
+
+                        belief = (
+                            tr * raw_val
+                            + (1.0 - tr) * combined
+                        )
+
+                    # --------------------------------------------------
+                    # Invalid or missing current reading
+                    # --------------------------------------------------
+
+                    else:
+
+                        residual = float("nan")
+                        match = 0.0
+
+                        if raw_invalid:
+
+                            # Invalid sensor evidence decreases trust.
+                            tr = (
+                                (1.0 - cfg.alpha_trust)
+                                * self.trust[z][v]
+                                + cfg.alpha_trust * match
+                            )
+
+                            tr = float(
+                                np.clip(
+                                    tr,
+                                    cfg.trust_floor,
+                                    1.0,
+                                )
+                            )
+
+                        else:
+
+                            # Missing data is not evidence of failure.
+                            tr = self.trust[z][v]
+
                         raw_weight = 0.0
                         belief = combined
 
@@ -416,42 +592,85 @@ class TrustNetwork:
                     new_est_valid[z][v] = True
                     new_trust[z][v] = tr
 
+                # ======================================================
+                # Cold recovery: no previous valid estimate
+                # ======================================================
+
                 elif raw_ok:
-                    # Cold-anchor onto first valid reading after an invalid initialization
+
                     act = raw_val
-                    cz = conf_cz = w = None
+
+                    cz = None
+                    conf_cz = None
+                    w = None
+
                     combined = raw_val
                     residual = 0.0
                     match = 1.0
+
+                    tr = (
+                        (1.0 - cfg.alpha_trust)
+                        * self.trust[z][v]
+                        + cfg.alpha_trust * match
+                    )
+
                     tr = float(
                         np.clip(
-                            (1.0 - cfg.alpha_trust) * self.trust[z][v] + cfg.alpha_trust * match,
+                            tr,
                             cfg.trust_floor,
                             1.0,
                         )
                     )
+
                     raw_weight = tr
                     belief = raw_val
+
                     new_est[z][v] = combined
                     new_est_valid[z][v] = True
                     new_trust[z][v] = tr
 
+                # ======================================================
+                # Still no valid estimate or current reading
+                # ======================================================
+
                 else:
-                    # Neither valid prior anchor nor valid reading: do not fabricate plausible values
+
                     act = float("nan")
-                    cz = conf_cz = w = None
+
+                    cz = None
+                    conf_cz = None
+                    w = None
+
                     combined = float("nan")
                     residual = float("nan")
                     match = 0.0
-                    tr = cfg.trust_floor
+
+                    tr = self.cfg.trust_floor
+
                     raw_weight = 0.0
                     belief = float("nan")
+
                     new_est[z][v] = float("nan")
                     new_est_valid[z][v] = False
                     new_trust[z][v] = tr
 
-                new_prev_raw[z][v] = RawReading(raw_val) if raw_ok else RawReading(float("nan"))
+                # ======================================================
+                # Save current raw reading
+                # ======================================================
+
+                if raw_missing:
+
+                    new_prev_raw[z][v] = RawReading(None)
+
+                else:
+
+                    new_prev_raw[z][v] = RawReading(raw_val)
+
                 new_raw_valid[z][v] = raw_ok
+
+                # ======================================================
+                # Build trust record
+                # ======================================================
 
                 records[z][v] = TrustRecord(
                     raw_val,
@@ -468,9 +687,16 @@ class TrustNetwork:
                     raw_weight,
                 )
 
+        # ==============================================================
+        # Commit state after processing all zones
+        # ==============================================================
+
         self.est = new_est
         self._est_valid = new_est_valid
+
         self.trust = new_trust
+
         self.prev_raw = new_prev_raw
         self._raw_valid = new_raw_valid
+
         return records

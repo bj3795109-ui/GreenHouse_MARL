@@ -231,6 +231,12 @@ class PIDController:
         # Fail-safe: prolonged missing/unreliable sensing -> zero energy/water output
         if quality == MeasurementQuality.UNRELIABLE_FAILSAFE:
             self._clear_active_drive()
+            self.state.derivative = 0.0
+            self.state.prev_measurement = None
+            self.state.last_error = 0.0
+            self.state.last_output = 0.0
+            # Stale effort must not survive an outage and drive actuators on recovery.
+            self.state.integral = 0.0
             return 0.0
 
         # Validate measurement value strictly for non-failsafe inputs:
@@ -302,16 +308,23 @@ class PIDController:
         # Proportional
         P = g.Kp * e
 
-        # Filtered Derivative-on-Measurement
-        if self.state.prev_measurement is None or g.Kd == 0.0:
+        # Filtered Derivative-on-Measurement.
+        # Inside the deadband the loop is deliberately not regulating, so D must not
+        # request actuation there either (it still brakes while outside the band).
+        if e == 0.0 or self.state.prev_measurement is None or g.Kd == 0.0:
             D = 0.0
         else:
             dy = y - self.state.prev_measurement
             denom = g.tau_f + dt_eff
             D = (g.tau_f / denom) * self.state.derivative - (g.Kd / denom) * dy
 
-        # Provisional Integral
-        I_cand = self.state.integral + g.Ki * dt_eff * e
+        # Provisional Integral.
+        # Inside the deadband (e == 0) stored effort bleeds off with time constant T_t
+        # instead of being held forever and driving actuators while the zone is in range.
+        if e == 0.0:
+            I_cand = self.state.integral * (1.0 - min(1.0, dt_eff / g.T_t))
+        else:
+            I_cand = self.state.integral + g.Ki * dt_eff * e
 
         # Unsaturated command & saturation
         v = P + I_cand + D
