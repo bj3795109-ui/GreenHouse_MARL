@@ -325,7 +325,11 @@ class TrustNetwork:
         Initialize the network.
 
         Missing initial readings are rejected.
-        Non-finite readings are allowed but remain unanchored.
+        Non-finite readings are allowed but remain unanchored: such a sensor enters
+        probation (trust starts at the floor and must climb past the SensorInterface's
+        trust threshold before it is TRUSTED). A biased FIRST valid reading cannot be
+        detected without redundancy, so fault scenarios must not start at t=0
+        (see fault_injection.scenario.validate_scenario).
         """
 
         self.prev_raw = {z: {} for z in ZONE_IDS}

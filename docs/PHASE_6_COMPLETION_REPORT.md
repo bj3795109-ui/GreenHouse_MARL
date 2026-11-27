@@ -1,7 +1,7 @@
 # Phase 6 Completion Report — Regression, Coverage, Documentation & MAPPO Readiness Audit
 
 **Date:** 26 November 2026  
-**Baseline Status:** Verified (**155/155 tests passing** in both `.venv` and a clean virtual environment; **92%** line+branch coverage).
+**Baseline Status (Phase 6 snapshot; the suite has since grown, run `python -m pytest` for current counts):** Verified (**155/155 tests passing** in both `.venv` and a clean virtual environment; **92%** line+branch coverage).
 
 ---
 

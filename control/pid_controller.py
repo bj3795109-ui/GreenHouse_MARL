@@ -8,6 +8,7 @@ This module intentionally has ZERO imports from PettingZoo, MARL, or TrustNetwor
 from __future__ import annotations
 
 import math
+import numbers
 from dataclasses import dataclass
 from typing import Optional
 
@@ -36,7 +37,7 @@ class PIDState:
 
 
 def _check_finite_number(val: object, name: str) -> float:
-    if isinstance(val, bool) or not isinstance(val, (int, float)):
+    if isinstance(val, bool) or not isinstance(val, numbers.Real):  # numpy scalars are Real
         raise ValueError(f"{name} must be a finite number, got {type(val).__name__}")
     fval = float(val)
     if not math.isfinite(fval):
@@ -322,7 +323,7 @@ class PIDController:
         # Inside the deadband (e == 0) stored effort bleeds off with time constant T_t
         # instead of being held forever and driving actuators while the zone is in range.
         if e == 0.0:
-            I_cand = self.state.integral * (1.0 - min(1.0, dt_eff / g.T_t))
+            I_cand = self.state.integral * math.exp(-dt_eff / g.T_t)  # exact decay: dt-invariant
         else:
             I_cand = self.state.integral + g.Ki * dt_eff * e
 
@@ -379,7 +380,7 @@ class PIDController:
             P = g.Kp * e
             u_low = self._effective_u_min()
             target_u = max(u_low, min(g.u_max, eff_u))
-            alpha_track = min(1.0, g.Ts / g.T_t)
+            alpha_track = 1.0 - math.exp(-g.Ts / g.T_t)
 
             if e == 0.0:
                 # Inside optimal deadband (or unidirectional excess): do not wind up integral

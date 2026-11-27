@@ -5,7 +5,7 @@ from .fault_types import (
     SensorFaultType,
     ActuatorFaultType
 )
-from .fault_config import FaultConfig
+from .fault_config import FaultConfig, check_step
 
 
 class FaultInjector:
@@ -73,16 +73,12 @@ class FaultInjector:
         ) or fault.target != target:
             return reading
 
-        if current_step < fault.start_step:
-            return reading
-
         stuck_key = (fault.fault_id, zone_id, target)
 
-        # Check automatic fault recovery.
-        if fault.auto_recover and fault.duration is not None:
-            if current_step >= fault.start_step + fault.duration:
+        if not fault.is_active_at(current_step):
+            if current_step >= fault.start_step:   # expired, not merely pending
                 self.stuck_values.pop(stuck_key, None)
-                return reading
+            return reading
 
         # Bias
         if fault.fault_type == SensorFaultType.BIAS.value:
@@ -139,10 +135,13 @@ class FaultInjector:
         Overlapping active faults are composed in list order (each fault
         transforms the output of the previous one); a dropout short-circuits
         the chain and returns None.
+
+        The result is NOT clipped to physical sensor limits. Saturation applies to
+        every reading (faulted or not), so it belongs to the wrapper's sensor model,
+        applied after fault injection.
         """
 
-        if current_step < 0:
-            raise ValueError("current_step cannot be negative")
+        current_step = check_step(current_step)
 
         matching_faults = []
 
@@ -160,18 +159,11 @@ class FaultInjector:
             if fault.target != target:
                 continue
 
-            if current_step < fault.start_step:
+            if not fault.is_active_at(current_step):
+                if (current_step >= fault.start_step
+                        and fault.fault_type == SensorFaultType.STUCK.value):
+                    self.stuck_values.pop((fault.fault_id, zone_id, target), None)
                 continue
-
-            # Handle automatic recovery.
-            if fault.auto_recover and fault.duration is not None:
-                if current_step >= fault.start_step + fault.duration:
-
-                    if fault.fault_type == SensorFaultType.STUCK.value:
-                        stuck_key = (fault.fault_id, zone_id, target)
-                        self.stuck_values.pop(stuck_key, None)
-
-                    continue
 
             matching_faults.append(fault)
 
@@ -223,8 +215,7 @@ class FaultInjector:
         if target not in valid_targets:
             raise ValueError("Invalid actuator target")
 
-        if current_step < 0:
-            raise ValueError("current_step cannot be negative")
+        current_step = check_step(current_step)
 
         matching_faults = []
 
@@ -242,13 +233,8 @@ class FaultInjector:
             if fault.target != target:
                 continue
 
-            if current_step < fault.start_step:
+            if not fault.is_active_at(current_step):
                 continue
-
-            # Respect automatic recovery.
-            if fault.auto_recover and fault.duration is not None:
-                if current_step >= fault.start_step + fault.duration:
-                    continue
 
             matching_faults.append(fault)
 
