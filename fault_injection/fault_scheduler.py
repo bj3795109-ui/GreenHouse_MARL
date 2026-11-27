@@ -1,4 +1,5 @@
-from .fault_config import FaultConfig
+from .fault_config import FaultConfig, check_step
+from .scenario import validate_scenario
 
 
 class FaultScheduler:
@@ -13,7 +14,12 @@ class FaultScheduler:
     - Record manual deactivation timestamps.
     """
 
-    def __init__(self, faults: list[FaultConfig]):
+    def __init__(self, faults: list[FaultConfig], min_start_step: int = 0):
+        """
+        Scenario validation is mandatory (a scheduler can no longer be built from a scenario
+        with unimplemented categories or order-dependent overlaps). The integration wrapper
+        must pass min_start_step=1: step 0 is the initial observation and cannot be faulted.
+        """
 
         self.faults = list(faults)
 
@@ -27,13 +33,14 @@ class FaultScheduler:
         if len(fault_ids) != len(set(fault_ids)):
             raise ValueError("Duplicate fault IDs are not allowed")
 
+        validate_scenario(self.faults, min_start_step=min_start_step)
+
     def get_active_faults(
         self,
         current_step: int
     ) -> list[FaultConfig]:
 
-        if current_step < 0:
-            raise ValueError("current_step cannot be negative")
+        current_step = check_step(current_step)
 
         active_faults = []
 
@@ -42,17 +49,8 @@ class FaultScheduler:
             if fault.fault_id in self.deactivated_faults:
                 continue
 
-            if current_step < fault.start_step:
+            if not fault.is_active_at(current_step):
                 continue
-
-            if fault.auto_recover and fault.duration is not None:
-
-                expiration_step = (
-                    fault.start_step + fault.duration
-                )
-
-                if current_step >= expiration_step:
-                    continue
 
             active_faults.append(fault)
 
@@ -71,8 +69,8 @@ class FaultScheduler:
         if fault_id not in known_fault_ids:
             raise ValueError(f"Unknown fault ID: {fault_id}")
 
-        if current_step is not None and current_step < 0:
-            raise ValueError("current_step cannot be negative")
+        if current_step is not None:
+            current_step = check_step(current_step)
 
         self.deactivated_faults.add(fault_id)
 

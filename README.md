@@ -2,7 +2,11 @@
 
 A three-zone greenhouse environmental control testbed combining a PettingZoo `ParallelEnv` physics simulator, a model-based sensor `TrustNetwork`, crop-aware per-zone PID fallback controllers, ambient-aware actuator arbitration, and a per-zone MARL/PID supervisory state machine.
 
-> **Implementation status (Phase 6 Baseline):** The physics simulator, Trust Network, PID fallback loops, actuator mapper/arbiter, `SensorInterface`, and per-zone `ZoneSupervisor` / `FallbackManager` are implemented and verified (**155/155 passing tests**, **92% coverage**). **A trained MAPPO policy is not implemented yet**; integration tests use a deterministic rule-based surrogate (`_simple_healthy_marl`) to validate MARL-to-PID fallback, `SAFE_MODE`, and recovery mechanics.
+> **Implementation status (Phase 6 Baseline):** The physics simulator, Trust Network, PID fallback loops, actuator mapper/arbiter, `SensorInterface`, and per-zone `ZoneSupervisor` / `FallbackManager` are implemented and verified (see [docs/TESTING.md](docs/TESTING.md) for the current suite and coverage snapshot). **A trained MAPPO policy is not implemented yet**; integration tests use a deterministic rule-based surrogate (`_simple_healthy_marl`) to validate MARL-to-PID fallback, `SAFE_MODE`, and recovery mechanics.
+
+> **Checkpoint status:** the fault-injection framework (`fault_injection/`) is implemented and tested as a **standalone subsystem**. It is **not yet integrated** with `GreenhouseEnv`, the Trust Network or the controllers (the Trust Network harness still uses its legacy minimal `Fault`/`NoisySensors`). The integration wrapper, fault-aware closed-loop experiments and MAPPO training are **not implemented**.
+
+> **Current model scope:** three controlled variables (temperature `T`, humidity `H`, soil moisture `M`) and four binary actuators per zone (`heat`, `fan`, `mist`, `water`). Light (`L`) and CO₂ are **deferred, not dropped** (see Future Roadmap).
 
 ---
 
@@ -51,7 +55,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed component diagrams
 
 ## Technology Stack
 
-- **Python** `3.14.2` (tested on Windows)
+- **Python** `3.14.2` (author's Windows environments); the 2026-11-27 checkpoint was re-run on Linux / Python 3.12.3 (see [docs/TESTING.md](docs/TESTING.md))
 - **Simulation & RL Interfaces**: `pettingzoo >= 1.27.0`, `gymnasium >= 1.4.0`
 - **Numerics**: `numpy >= 2.5.5`
 - **Testing & Coverage**: `pytest >= 9.2.0`, `pytest-cov >= 7.1.0`
@@ -68,8 +72,18 @@ GreenHouse_MARL/
 │   └── readme.md                     # Physics-pass scope and calibration notes
 ├── trust_network/
 │   ├── trust_network.py              # RawReading/CorrectedValue guards, estimators, HealthyResiduals, TrustNetwork
-│   ├── harness.py                    # NoisySensors, Fault injection, seeded rollout(), bootstrap_healthy()
+│   ├── harness.py                    # NoisySensors, legacy minimal Fault (to be replaced by fault_injection/), seeded rollout(), bootstrap_healthy()
 │   └── test_trust_network.py         # Trust invariant, fault detection/isolation, NaN/Inf, recovery tests
+├── fault_injection/                  # Standalone fault framework (NOT yet wired into env/control)
+│   ├── fault_config.py               # FaultConfig: validated single-fault definition, is_active_at() timing predicate
+│   ├── fault_types.py                # Sensor/actuator fault enums
+│   ├── fault_injector.py             # Sensor/actuator transforms, per-(fault,zone,target,step) deterministic RNG
+│   ├── fault_scheduler.py            # Active-fault selection; validates the scenario on construction
+│   ├── fault_lifecycle.py            # One update per step: activation/deactivation events
+│   ├── fault_logger.py               # Ground-truth event log
+│   ├── scenario.py                   # validate_scenario(): ids, start_step, categories, order-dependent overlaps
+│   ├── adapter.py                    # Greenhouse <-> injector naming (checked against control.types at import)
+│   └── tests/                        # Unit, composition, lifecycle, config-hardening, scenario and adapter tests
 ├── control/
 │   ├── __init__.py                   # Public control package exports
 │   ├── types.py                      # ControlMode, MeasurementQuality, SensorMeasurement, CropBounds, PIDGains, etc.
@@ -160,11 +174,11 @@ ambient = AmbientState(params.T_ambient, params.H_ambient)
 ## Running Tests
 
 ```powershell
-# Full regression suite (155 tests)
+# Full regression suite
 .venv\Scripts\python.exe -m pytest -v
 
 # Full suite with branch coverage
-.venv\Scripts\python.exe -m pytest --cov=control --cov=env --cov=trust_network --cov-branch --cov-report=term-missing --cov-report=html:htmlcov
+.venv\Scripts\python.exe -m pytest --cov=control --cov=env --cov=trust_network --cov=fault_injection --cov-branch --cov-report=term-missing --cov-report=html:htmlcov
 
 # Focused suites
 .venv\Scripts\python.exe -m pytest control/tests/test_pid_unit.py -v
@@ -172,12 +186,14 @@ ambient = AmbientState(params.T_ambient, params.H_ambient)
 .venv\Scripts\python.exe -m pytest trust_network/test_trust_network.py -v
 .venv\Scripts\python.exe -m pytest control/tests/test_arbiter_and_supervisor.py -v
 .venv\Scripts\python.exe -m pytest control/tests/test_integration_scenarios.py -v
+.venv\Scripts\python.exe -m pytest fault_injection -v
 ```
 
 ---
 
 ## Current Implementation Status & Known Limitations
 
+- **Fault injection is not integrated**: `fault_injection/` has no callers outside its own tests. Planned design: `GreenhouseEnv` stays pure physics; a wrapper owns the sensor model (including physical sensor limits, applied after fault injection), sensor/actuator fault injection, the fault lifecycle (one update per step) and evaluator-only ground truth. The wrapper must build `FaultScheduler(..., min_start_step=1)`.
 - **No trained MAPPO policy yet**: All MARL integration tests use `_simple_healthy_marl`. See [docs/MAPPO_READINESS.md](docs/MAPPO_READINESS.md).
 - **Placeholder physics & tuning**: `PlaceholderParams` in [env/env.py](env/env.py) and gains in [control/configs/pid_tuning.json](control/configs/pid_tuning.json) are provisional; `M` uses a `relative_percent` placeholder scale (`0–100`).
 - **Omitted V1.1 variables**: Light (`L`) and CO₂ dynamics are not yet implemented in `env/env.py` or `TrustNetwork`.
@@ -188,7 +204,7 @@ ambient = AmbientState(params.T_ambient, params.H_ambient)
 
 ## Future Roadmap
 
-1. Implement reward shaping, CTDE global state (`env.state()`), and fault-aware observation wrapping in `GreenhouseEnv`.
+1. Implement reward shaping, CTDE global state (`env.state()`), and a fault-aware observation wrapper around `GreenhouseEnv` (the env itself stays pure physics).
 2. Train and evaluate single-agent RL and CTDE MAPPO baselines against the PID fallback controller.
 3. Calibrate `PlaceholderParams`, `AssumedParams`, `conf_act`, and PID gains against hardware measurements.
-4. Add light (`L`) dynamics (`u_light` 5th actuator), full fault-injection framework, and V1.2 explainability dashboard integration.
+4. Add light (`L`) dynamics (`u_light` 5th actuator), an integration wrapper that routes `fault_injection/` through the Trust Network and controllers, and V1.2 explainability dashboard integration.

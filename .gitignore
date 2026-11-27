@@ -7,15 +7,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Python virtual environments
-.venv/
-venv/
-
-# Python bytecode and cache files
-__pycache__/
-*.py[cod]
-*$py.class
-
 # Pytest and coverage artifacts
 .pytest_cache/
 .coverage

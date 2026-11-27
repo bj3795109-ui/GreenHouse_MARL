@@ -1,3 +1,5 @@
+from .fault_config import check_step
+
 class FaultLifecycleManager:
     """
     Coordinates fault scheduling, injection cleanup,
@@ -26,8 +28,7 @@ class FaultLifecycleManager:
             list[FaultConfig]: Currently active faults.
         """
 
-        if current_step < 0:
-            raise ValueError("current_step cannot be negative")
+        current_step = check_step(current_step)
 
         if current_step < self.last_step:
             raise ValueError(
@@ -59,12 +60,7 @@ class FaultLifecycleManager:
                     manual_step = current_step
 
             # Determine automatic expiration.
-            expiration_step = None
-
-            if fault.auto_recover and fault.duration is not None:
-                expiration_step = (
-                    fault.start_step + fault.duration
-                )
+            expiration_step = fault.end_step
 
             # Determine the actual termination event.
             end_step = None
@@ -83,9 +79,9 @@ class FaultLifecycleManager:
                     end_step = expiration_step
                     reason = "automatic_recovery"
 
-            # A fault manually deactivated before its scheduled
-            # start never became active.
-            if end_step is not None and end_step < fault.start_step:
+            # A fault deactivated at or before its scheduled start had zero
+            # active duration: it never became active, so log nothing.
+            if end_step is not None and end_step <= fault.start_step:
                 continue
 
             # Detect activation.
