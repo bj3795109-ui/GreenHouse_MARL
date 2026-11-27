@@ -36,6 +36,7 @@ $$
 - **Proportional**: $P_k = K_p e_k$
 - **Filtered Derivative-on-Measurement** (zero derivative kick on crop/stage target shifts):
   $$D_k = \frac{\tau_f}{\tau_f + \Delta t_{\text{eff}}} D_{k-1} - \frac{K_d}{\tau_f + \Delta t_{\text{eff}}} (y_k - y_{k-1})$$
+  Derivative output is suppressed inside the optimal-band deadband (`e_k = 0`) so measurement movement within the target band cannot request actuation.
 - **Provisional Integral**: $I_{\text{cand}} = I_{k-1} + K_i \Delta t_{\text{eff}} e_k$
 - **Saturation**: $v_k = P_k + I_{\text{cand}} + D_k$, $u_k = \text{clip}(v_k, u_{\text{low}}, u_{\max})$, where $u_{\text{low}} = \max(0, u_{\min})$ when `unidirectional_positive=True`.
 - **Back-Calculation & External-Block Anti-Windup**:

@@ -1,4 +1,4 @@
-```python
+
 """
 Naming adapter between the greenhouse environment and fault injector.
 
@@ -36,6 +36,9 @@ _ZONE_FROM_INJECTOR = {
 def to_injector_zone(zone_id: str) -> int:
     """Convert canonical zone ID to injector zone index."""
 
+    if not isinstance(zone_id, str):
+        raise ValueError(f"Invalid greenhouse zone: {zone_id}")
+
     try:
         return _ZONE_TO_INJECTOR[zone_id]
     except KeyError:
@@ -44,6 +47,9 @@ def to_injector_zone(zone_id: str) -> int:
 
 def to_canonical_zone(zone_index: int) -> str:
     """Convert injector zone index to canonical zone ID."""
+
+    if type(zone_index) is not int:
+        raise ValueError(f"Invalid injector zone index: {zone_index}")
 
     try:
         return _ZONE_FROM_INJECTOR[zone_index]
@@ -70,6 +76,9 @@ _VARIABLE_FROM_INJECTOR = {
 def to_injector_variable(variable: str) -> str:
     """Convert canonical sensor variable to injector target."""
 
+    if not isinstance(variable, str):
+        raise ValueError(f"Invalid greenhouse variable: {variable}")
+
     try:
         return _VARIABLE_TO_INJECTOR[variable]
     except KeyError:
@@ -78,6 +87,9 @@ def to_injector_variable(variable: str) -> str:
 
 def to_canonical_variable(variable: str) -> str:
     """Convert injector sensor target to canonical variable."""
+
+    if not isinstance(variable, str):
+        raise ValueError(f"Invalid injector variable: {variable}")
 
     try:
         return _VARIABLE_FROM_INJECTOR[variable]
@@ -105,6 +117,9 @@ _ACTUATOR_FROM_INJECTOR = {
 def to_injector_actuator(actuator: str) -> str:
     """Convert canonical actuator name to injector target."""
 
+    if not isinstance(actuator, str):
+        raise ValueError(f"Invalid greenhouse actuator: {actuator}")
+
     try:
         return _ACTUATOR_TO_INJECTOR[actuator]
     except KeyError:
@@ -114,8 +129,10 @@ def to_injector_actuator(actuator: str) -> str:
 def to_canonical_actuator(actuator: str) -> str:
     """Convert injector actuator target to canonical name."""
 
+    if not isinstance(actuator, str):
+        raise ValueError(f"Invalid injector actuator: {actuator}")
+
     try:
         return _ACTUATOR_FROM_INJECTOR[actuator]
     except KeyError:
         raise ValueError(f"Unknown injector actuator: {actuator}")
-```
