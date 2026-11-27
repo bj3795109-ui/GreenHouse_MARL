@@ -73,10 +73,11 @@ def rollout(net, steps=600, seed=0, faults=None, env_params=None, return_truth=F
     env.action_space(ZONE_IDS[0]).seed(seed)
     rng = np.random.default_rng(seed + 1000)
     sensors = NoisySensors(rng, faults=faults)
+    act_rng = np.random.default_rng(seed + 2000)  # seeded: space.sample() was not
     net.reset(sensors.read(env.state, 0))
     log, truth = [], []
     for t in range(1, steps + 1):
-        actions = {z: env.action_space(z).sample() for z in ZONE_IDS}
+        actions = {z: act_rng.integers(0, 2, size=4).astype(np.int8) for z in ZONE_IDS}
         env.step(actions)
         log.append(net.step(sensors.read(env.state, t), actions))
         truth.append({z: dict(env.state[z]) for z in ZONE_IDS})

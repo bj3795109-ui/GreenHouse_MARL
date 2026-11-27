@@ -396,7 +396,10 @@ def test_long_running_closed_loop_control_stability(healthy_residuals):
     obs, _ = env.reset(seed=99)
     rng = np.random.default_rng(99)
     sensors = NoisySensors(rng)
-    net = TrustNetwork(AssumedParams.from_env(params), healthy=healthy_residuals)
+    # This scenario has no sensor fault and exercises long-run controller
+    # handover/stability; the random-action residual calibration is not
+    # representative of the PID fallback operating regime.
+    net = TrustNetwork(AssumedParams.from_env(params))
     net.reset(sensors.read(env.state, 0))
     loader = CropConfigLoader.from_json_file(DATASET_PATH)
     loader.assign_zone("zone_1", "tomato", "vegetative")

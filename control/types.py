@@ -114,6 +114,9 @@ class ActuatorConfig:
     ambient_margin_H: float = 1.5
     arbiter_hysteresis: float = 0.05
     allow_cold_dehumidification: bool = False
+    # Tie-break bias (in normalized-excursion units) given to temperature over humidity
+    # when the shared fan is contested. 0.0 makes the arbiter symmetric.
+    temp_priority_bias: float = 0.15
 
 
 @dataclass(frozen=True)

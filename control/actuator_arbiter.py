@@ -223,7 +223,7 @@ class ActuatorArbiter:
                 else:
                     # Cooling via fan can be compensated on H by mist; compare severity + hysteresis
                     margin = -c.arbiter_hysteresis if self._last_fan_decision == 1 else c.arbiter_hysteresis
-                    if (T_sev + 0.15) > (H_sev + margin):
+                    if (T_sev + c.temp_priority_bias) > (H_sev + margin):
                         desired_fan = 1
                         reason = "conflict_T_severity_wins"
                     else:

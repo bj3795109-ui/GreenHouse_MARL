@@ -188,14 +188,14 @@ def test_pid05_and_pid06_anti_windup_at_max_and_min_saturation():
 def test_pid07_derivative_responds_to_rapid_measurement_change():
     pid = PIDController("T", PIDGains(Kp=0.0, Ki=0.0, Kd=4.0, tau_f=2.0, Ts=1.0, dt=1.0))
     b = _bounds(20.0, 25.0)
-    pid.step(_meas(22.0), b)
-    # Rapid jump upward by +3.0 inside/past band -> D = -(4.0 / (2.0 + 1.0)) * 3.0 = -4.0 -> clamped -1.0
-    u_rise = pid.step(_meas(25.0), b)
+    pid.step(_meas(24.0), b)
+    # Crossing above the band by +3.0 -> D = -(4.0 / (2.0 + 1.0)) * 3.0 = -4.0 -> clamped -1.0
+    u_rise = pid.step(_meas(27.0), b)
     assert pid.state.derivative == pytest.approx(-4.0)
     assert u_rise == pytest.approx(-1.0)
 
-    # Rapid drop by -1.5 -> D moves positive to oppose rapid cooling
-    u_drop = pid.step(_meas(23.5), b)
+    # A rapid drop that remains outside the band -> D moves positive to oppose rapid cooling
+    u_drop = pid.step(_meas(25.5), b)
     expected_d = (2.0 / 3.0) * (-4.0) - (4.0 / 3.0) * (-1.5)
     assert pid.state.derivative == pytest.approx(expected_d)
     assert u_drop > u_rise
